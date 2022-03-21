@@ -1,5 +1,6 @@
-from base64 import encode
+from base64 import decode, encode
 import enum
+from lib2to3.pgen2 import token
 from unittest.util import _MAX_LENGTH
 import numpy as np
 import yaml
@@ -8,8 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 import requests
 import io
-
-from zmq import device
+import random
 
 from models.models import Decoder, DecoderAttnRNN, DecoderTransform
 from transformers import BertTokenizer, BertModel
@@ -18,6 +18,18 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from omegaconf import OmegaConf
 from taming.models.vqgan import VQModel
+
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+TEACHER_FORCE_RATIO = 1
+TEST_IMG_URL = "https://www.coinkolik.com/wp-content/uploads/2021/12/shiba-inu-dog.jpg"
+PRETRAIN_DIR = "pretrained"
+MODEL_DIR = "vqgan_f16_16384"
+ENC_MAX_LEN = 50
+DEC_MAX_LEN = 256
+HID_LEN = 768
+TARGET_LEN = 256
+VOCAB_IN = 30522
+VOCAB_OUT = 16384
 
 def load_config(config_path, display=False):
     config = OmegaConf.load(config_path)
@@ -88,68 +100,87 @@ def stack_images(images, titles=[]):
     """
     return img
 
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-TEST_IMG_URL = "https://www.coinkolik.com/wp-content/uploads/2021/12/shiba-inu-dog.jpg"
-PRETRAIN_DIR = "pretrained"
-MODEL_DIR = "vqgan_f16_16384"
-MAX_LEN = 50
-HID_LEN = 768
-TARGET_LEN = 256
-VOCAB_IN = 30522
-VOCAB_OUT = 16384
+def train(image_text, image_tokens, bert_encoder, bert_tokenizer, decoder, optim, criterion, max_length=DEC_MAX_LEN):
+    optim.zero_grad()
+    with torch.no_grad():
+        text_tokens = bert_tokenizer(image_text, max_length=ENC_MAX_LEN, padding="max_length", return_tensors="pt").to(DEVICE)
+        text_decode = bert_encoder(**text_tokens)[2]
+        text_embed = torch.stack(text_decode, dim=0).permute(1, 0, 2, 3)[0][-1]
+    encoder_out = torch.zeros(max_length, HID_LEN).to(DEVICE)
+    for i in range(len(text_embed)):
+        encoder_out[i] = text_embed[i]
+    decoder_hidden = decoder.hidden_ones().to(DEVICE)
+    decoder_input = torch.tensor([[0]]).to(DEVICE)
+    use_teacher_forcing = True
+    loss = 0
+    if use_teacher_forcing:
+        for i in range(DEC_MAX_LEN):
+            out, decoder_hidden, atten = decoder(decoder_input, decoder_hidden, encoder_out)
+            decoder_input = image_tokens[i]
+            loss += criterion(out, image_tokens[i])
+    else:
+        for i in range(DEC_MAX_LEN):
+            out, decoder_hidden, atten = decoder(decoder_input, decoder_hidden, encoder_out)
+            _, topi = out.data.topk(1)
+            decoder_input = topi.squeeze().detach()
+            loss += criterion(out, image_tokens[i])
+    loss.backward()
+    optim.step()
+    return loss.item() / len(image_tokens)
+
+def evaluate(image_text, bert_encoder, bert_tokenizer, decoder, max_length=DEC_MAX_LEN):
+    with torch.no_grad():
+        text_tokens = bert_tokenizer(image_text, max_length=ENC_MAX_LEN, padding="max_length", return_tensors="pt").to(DEVICE)
+        text_decode = bert_encoder(**text_tokens)[2]
+        text_embed = torch.stack(text_decode, dim=0).permute(1, 0, 2, 3)[0][-1]
+        encoder_out = torch.zeros(max_length, HID_LEN).to(DEVICE)
+        for i in range(len(text_embed)):
+            encoder_out[i] = text_embed[i]
+        decoder_hidden = decoder.hidden_ones().to(DEVICE)
+        decoder_input = torch.tensor([[0]]).to(DEVICE)
+        decoded_words = torch.zeros(max_length, dtype=torch.int64).to(DEVICE)
+        for i in range(DEC_MAX_LEN):
+            out, decoder_hidden, atten = decoder(decoder_input, decoder_hidden, encoder_out)
+            _, topi = out.data.topk(1)
+            decoded_words[i] = topi.item()
+            decoder_input = topi.squeeze().detach()
+    return decoded_words
+        
 
 cfg_vqgan = load_config(f"./{PRETRAIN_DIR}/{MODEL_DIR}/configs/model.yaml", display=False)
 tokenizer_bert = BertTokenizer.from_pretrained("bert-base-uncased")
 model_vqgan = load_vqgan(cfg_vqgan, ckpt_path=f"{PRETRAIN_DIR}/{MODEL_DIR}/checkpoints/last.ckpt").to(DEVICE)
 model_bert = BertModel.from_pretrained("bert-base-uncased", output_hidden_states=True).to(DEVICE)
-model_decoder = DecoderAttnRNN(VOCAB_OUT).to(DEVICE)
+model_decoder = DecoderAttnRNN(VOCAB_OUT, max_length=DEC_MAX_LEN).to(DEVICE)
 model_vqgan.eval()
 model_bert.eval()
 
 image = preprocess(download_image(TEST_IMG_URL)).to(DEVICE)
-data = ("A picture of shiba-inu breed dog", image)
-
-with torch.no_grad():
-    text_tokens = tokenizer_bert(data[0], max_length=MAX_LEN, padding="max_length", return_tensors="pt").to(DEVICE)
-    text_decode = model_bert(**text_tokens)[2]
-    text_embed = torch.stack(text_decode, dim=0).permute(1, 0, 2, 3)
-
-encoder_out = text_embed[0][-1]
+image_encode, image_tokens = vqgan_encode(image, model_vqgan)
+data = ("A picture of shiba-inu breed dog", image_tokens)
 
 criterion = nn.NLLLoss()
-optimizer = optim.SGD(model_decoder.parameters(), lr=0.01)
-image_encode, image_tokens = vqgan_encode(data[1], model_vqgan)
+optimizer = optim.SGD(model_decoder.parameters(), lr=0.001)
 
-decoder_hidden = model_decoder.hidden_ones().to(DEVICE)
-decoder_input = torch.tensor([[0]]).to(DEVICE)
-decoded_tokens = []
-decoder_attens = torch.zeros(MAX_LEN, MAX_LEN)
+for steps in range(10):
+    for i in range(100):
+        loss = train(data[0], data[1], model_bert, tokenizer_bert, model_decoder, optimizer, criterion, max_length=DEC_MAX_LEN)
+        print(f"Step-{steps} Epoch-{i+1} Loss: {loss}")
 
-for i in range(MAX_LEN):
-    out, hidden, atten = model_decoder(decoder_input, decoder_hidden, encoder_out)
-    decoder_attens[i] = atten.data
-    topv, topi = out.data.topk(1)
-    decoded_tokens.append(topi.item())
-    decoder_input = topi.squeeze().detach()
+    decoded_tokens = evaluate(data[0], model_bert, tokenizer_bert, model_decoder, max_length=DEC_MAX_LEN)
 
-print(decoded_tokens)
+    with torch.no_grad():
+        image_from_text = vqgan_decode(preprocess_vqgan(
+            model_vqgan.quantize.get_codebook_entry(decoded_tokens, (1, 16, 16, 256))
+        ), model_vqgan)
+        image_from_image = vqgan_decode(preprocess_vqgan(
+            model_vqgan.quantize.get_codebook_entry(image_tokens.flatten(), (1, 16, 16, 256))
+        ), model_vqgan)
 
-"""
-text_encode = tokenizer_bert(data[0], padding=True, return_tensors="pt").to(DEVICE)
-text_embed = model_bert(**text_encode)[0][:, 0, :][0]
-text_decode = model_decoder(text_embed)
+    images = [ image, image_from_text, image_from_image ]
+    images = [ custom_to_pil(img[0]) for img in images ]
 
-with torch.no_grad():
-    #image_from_text = vqgan_decode(preprocess_vqgan(text_decode), model_vqgan)
-    image_from_image = vqgan_decode(preprocess_vqgan(
-        model_vqgan.quantize.get_codebook_entry(image_tokens.flatten(), (1, 16, 16, 256))), model_vqgan
-    )
-
-images = [ image, image_from_image ]
-images = [ custom_to_pil(img[0]) for img in images ]
-
-stacked = stack_images(images, ["Original", "VQGAN"])
-stacked.show()
-"""
+    stacked = stack_images(images, ["Original", "Ours" ,"VQGAN"])
+    stacked.show()
 
 
