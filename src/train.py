@@ -1,4 +1,6 @@
+from base64 import encode
 import enum
+from unittest.util import _MAX_LENGTH
 import numpy as np
 import yaml
 import torch
@@ -7,7 +9,9 @@ import torch.optim as optim
 import requests
 import io
 
-from models.models import Decoder
+from zmq import device
+
+from models.models import Decoder, DecoderAttnRNN, DecoderTransform
 from transformers import BertTokenizer, BertModel
 from PIL import Image, ImageDraw, ImageFont
 import torchvision.transforms as T
@@ -88,29 +92,52 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 TEST_IMG_URL = "https://www.coinkolik.com/wp-content/uploads/2021/12/shiba-inu-dog.jpg"
 PRETRAIN_DIR = "pretrained"
 MODEL_DIR = "vqgan_f16_16384"
+MAX_LEN = 50
+HID_LEN = 768
+TARGET_LEN = 256
+VOCAB_IN = 30522
+VOCAB_OUT = 16384
 
 cfg_vqgan = load_config(f"./{PRETRAIN_DIR}/{MODEL_DIR}/configs/model.yaml", display=False)
 tokenizer_bert = BertTokenizer.from_pretrained("bert-base-uncased")
 model_vqgan = load_vqgan(cfg_vqgan, ckpt_path=f"{PRETRAIN_DIR}/{MODEL_DIR}/checkpoints/last.ckpt").to(DEVICE)
-model_bert = BertModel.from_pretrained("bert-base-uncased").to(DEVICE)
+model_bert = BertModel.from_pretrained("bert-base-uncased", output_hidden_states=True).to(DEVICE)
+model_decoder = DecoderAttnRNN(VOCAB_OUT).to(DEVICE)
+model_vqgan.eval()
 model_bert.eval()
-model_decoder = Decoder().to(DEVICE)
 
 image = preprocess(download_image(TEST_IMG_URL)).to(DEVICE)
 data = ("A picture of shiba-inu breed dog", image)
 
-text_encode = tokenizer_bert(data[0], padding=True, return_tensors="pt").to(DEVICE)
-text_embed = model_bert(**text_encode)[0][:, 0, :][0]
+with torch.no_grad():
+    text_tokens = tokenizer_bert(data[0], max_length=MAX_LEN, padding="max_length", return_tensors="pt").to(DEVICE)
+    text_decode = model_bert(**text_tokens)[2]
+    text_embed = torch.stack(text_decode, dim=0).permute(1, 0, 2, 3)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(model_decoder.parameters(), lr=0.001, momentum=0.9)
+encoder_out = text_embed[0][-1]
 
+criterion = nn.NLLLoss()
+optimizer = optim.SGD(model_decoder.parameters(), lr=0.01)
 image_encode, image_tokens = vqgan_encode(data[1], model_vqgan)
 
+decoder_hidden = model_decoder.hidden_ones().to(DEVICE)
+decoder_input = torch.tensor([[0]]).to(DEVICE)
+decoded_tokens = []
+decoder_attens = torch.zeros(MAX_LEN, MAX_LEN)
+
+for i in range(MAX_LEN):
+    out, hidden, atten = model_decoder(decoder_input, decoder_hidden, encoder_out)
+    decoder_attens[i] = atten.data
+    topv, topi = out.data.topk(1)
+    decoded_tokens.append(topi.item())
+    decoder_input = topi.squeeze().detach()
+
+print(decoded_tokens)
+
+"""
 text_encode = tokenizer_bert(data[0], padding=True, return_tensors="pt").to(DEVICE)
 text_embed = model_bert(**text_encode)[0][:, 0, :][0]
 text_decode = model_decoder(text_embed)
-
 
 with torch.no_grad():
     #image_from_text = vqgan_decode(preprocess_vqgan(text_decode), model_vqgan)
@@ -123,5 +150,6 @@ images = [ custom_to_pil(img[0]) for img in images ]
 
 stacked = stack_images(images, ["Original", "VQGAN"])
 stacked.show()
+"""
 
 
