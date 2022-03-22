@@ -1,7 +1,3 @@
-from base64 import decode, encode
-import enum
-from lib2to3.pgen2 import token
-from unittest.util import _MAX_LENGTH
 import numpy as np
 import yaml
 import torch
@@ -9,11 +5,10 @@ import torch.nn as nn
 import torch.optim as optim
 import requests
 import io
-import random
 
-from models.models import Decoder, DecoderAttnRNN, DecoderTransform
+from models.models import DecoderAttnRNN
 from transformers import BertTokenizer, BertModel
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from omegaconf import OmegaConf
