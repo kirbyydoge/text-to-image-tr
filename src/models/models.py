@@ -54,12 +54,11 @@ class DecoderTransform(nn.Module):
 		return self.log_softmax(dense)
 
 class DecoderAttnRNN(nn.Module):
-	def __init__(self, output_size, hidden_size=768, dropout=0.1, max_length=50):
+	def __init__(self, output_size, hidden_size=768, dropout=0.1, max_length=512):
 		super().__init__()
 		self.hidden_size = hidden_size
 		self.output_size = output_size
 		self.max_length = max_length
-
 		self.embedding = nn.Embedding(self.output_size, self.hidden_size)
 		self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
 		self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)

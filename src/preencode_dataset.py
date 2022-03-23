@@ -20,7 +20,7 @@ OUT_PATH = "D:/C12M/cc12m_tr_encoded.bin"
 ECC_PATH = "D:/C12M/cc12m_tr_eccd.bin"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 PRETRAIN_DIR = "pretrained"
-MODEL_DIR = "vqgan_f16_16384"
+MODEL_DIR = "vqgan_f16_1024"
 NUM_PATCHES = 256
 NUM_DOWNLOADERS = 100
 NUM_PREENCODERS = 1
@@ -142,6 +142,7 @@ def preencode_worker(image_queue:Queue, token_queue:Queue, worker_id, num_patche
 		idx = task[0]
 		try:
 			img = preprocess(task[1], num_patches).to(device)
+			img = preprocess_vqgan(img)
 			with torch.no_grad():
 				_, tokens = vqgan_encode(img, model_vqgan)
 			tokens = tokens.flatten().type(torch.int32).to("cpu")
@@ -234,7 +235,7 @@ def load_tensor(f, patches):
 	if not idx_bytes:
 		return -1, None
 	index = struct.unpack("i", idx_bytes)[0]
-	data = torch.zeros(patches, dtype=torch.int32)
+	data = torch.zeros(patches, dtype=torch.int64)
 	for i in range(patches):
 		data[i] = struct.unpack("i", f.read(4))[0]
 	return index, data
