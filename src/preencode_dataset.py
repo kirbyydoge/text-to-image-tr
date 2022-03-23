@@ -17,6 +17,7 @@ from threading import Thread
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'}
 DATA_PATH = "D:/C12M/cc12m_tr.tsv"
 OUT_PATH = "D:/C12M/cc12m_tr_encoded.bin"
+ECC_PATH = "D:/C12M/cc12m_tr_eccd.bin"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 PRETRAIN_DIR = "pretrained"
 MODEL_DIR = "vqgan_f16_16384"
@@ -171,8 +172,11 @@ def token_combiner(out_path, token_queue:Queue, num_patches, num_preencoders, in
 	running = True
 	retired_preencoders = 0
 	written_lines = 0
-	file = open(out_path, "wb")
-	file.write(struct.pack("i", num_patches))
+	if os.path.exists(out_path):
+		file = open(out_path, "ab")
+	else:
+		file = open(out_path, "wb")
+		file.write(struct.pack("i", num_patches))
 	start = time.time()
 	while running:
 		task = token_queue.get()
@@ -198,11 +202,11 @@ def token_combiner(out_path, token_queue:Queue, num_patches, num_preencoders, in
 	file.flush()
 	file.close()
 
-def encode_pipelined(start_idx, max_download=-1):
+def encode_pipelined(data_path, out_path, start_idx, max_download=-1):
 	url_queue = Queue(NUM_DOWNLOADERS*10)
 	image_queue = Queue()
 	token_queue = Queue()
-	scheduler = Thread(target=download_scheduler, args=(DATA_PATH, url_queue, start_idx, max_download))
+	scheduler = Thread(target=download_scheduler, args=(data_path, url_queue, start_idx, max_download))
 	downloaders = []
 	preencoders = []
 	for i in range(NUM_DOWNLOADERS):
@@ -211,7 +215,7 @@ def encode_pipelined(start_idx, max_download=-1):
 	for i in range(NUM_PREENCODERS):
 		thread = Thread(target=preencode_worker, args=(image_queue, token_queue, i, NUM_PATCHES, DEVICE, INFO_FREQ, NUM_DOWNLOADERS))
 		preencoders.append(thread)
-	combiner = Thread(target=token_combiner, args=(OUT_PATH, token_queue, NUM_PATCHES, NUM_PREENCODERS, INFO_FREQ * NUM_PREENCODERS))
+	combiner = Thread(target=token_combiner, args=(out_path, token_queue, NUM_PATCHES, NUM_PREENCODERS, INFO_FREQ * NUM_PREENCODERS))
 	scheduler.start()
 	for i in range(NUM_DOWNLOADERS):
 		downloaders[i].start()
@@ -235,7 +239,7 @@ def load_tensor(f, patches):
 		data[i] = struct.unpack("i", f.read(4))[0]
 	return index, data
 
-def load_existing(path):
+def check_existing(path):
 	if not os.path.exists(path):
 		return -1
 	file = open(path, "rb")
@@ -248,7 +252,30 @@ def load_existing(path):
 			max_index = index
 	return max_index
 
+def ecc_existing(out_path, ecc_path):
+	if not os.path.exists(out_path):
+		return
+	f_data = open(out_path, "rb")
+	f_ecc = open(ecc_path, "wb")
+	patches = struct.unpack("i", f_data.read(4))[0]
+	f_ecc.write(struct.pack("i", patches))
+	index, data = load_tensor(f_data, patches)
+	while index != -1:
+		f_ecc.write(struct.pack("i", index))
+		f_ecc.write(struct.pack(f"{patches}i", *data))
+		try:
+			index, data = load_tensor(f_data, patches)
+		except Exception as e:
+			print(e)
+			index = -1
+	f_data.close()
+	f_ecc.close()
+
 if __name__ == "__main__":
-	max_index = load_existing(OUT_PATH)
-	print(f"Last indexed tensor: {max_index}")
-	encode_pipelined(max_index + 1)
+	ECC = False
+	if ECC:
+		ecc_existing(OUT_PATH, ECC_PATH)
+	else:
+		max_index = check_existing(OUT_PATH)
+		print(f"Last indexed tensor: {max_index}")
+		encode_pipelined(DATA_PATH, OUT_PATH, max_index + 1)
