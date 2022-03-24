@@ -1,3 +1,4 @@
+from audioop import avg
 import struct
 import numpy as np
 import yaml
@@ -141,7 +142,7 @@ def evaluate(image_text, bert_encoder, bert_tokenizer, decoder, max_length=DEC_M
 		text_tokens = bert_tokenizer(image_text, max_length=ENC_MAX_LEN, padding="max_length", return_tensors="pt").to(DEVICE)
 		text_decode = bert_encoder(**text_tokens)[2]
 		text_embed = torch.stack(text_decode, dim=0).permute(1, 0, 2, 3)[0][-1]
-		encoder_out = torch.zeros(max_length, HID_LEN).to(DEVICE)
+		encoder_out = torch.zeros(ENC_MAX_LEN, HID_LEN).to(DEVICE)
 		for i in range(len(text_embed)):
 			encoder_out[i] = text_embed[i]
 		decoder_hidden = decoder.hidden_ones().to(DEVICE)
@@ -158,6 +159,7 @@ def load_dataset(encoding_path, translation_path, device=DEVICE, max_data=20):
 	dataset = {}
 	encoding_file = open(encoding_path, "rb")
 	patches = struct.unpack("i", encoding_file.read(4))[0]
+	print(f"Patches: {patches}")
 	index, data = load_tensor(encoding_file, patches)
 	data_count = 0
 	while index != -1 and data_count != max_data:
@@ -172,6 +174,7 @@ def load_dataset(encoding_path, translation_path, device=DEVICE, max_data=20):
 			data_count += 1
 		except Exception as e:
 			index = -1
+	print(f"Loaded {data_count} encoding tensors.")
 	with open(translation_path, "r", encoding="utf-8") as f:
 		for i, line in enumerate(f):
 			if i in dataset:
@@ -182,55 +185,75 @@ def load_dataset(encoding_path, translation_path, device=DEVICE, max_data=20):
 	return dataset
 
 def peek_data(peek_len, model_vqgan):
-	dataset = load_dataset(ENCODE_PATH, TRANSLATE_PATH, peek_len)
+	dataset = load_dataset(ENCODE_PATH, TRANSLATE_PATH, DEVICE, peek_len)
 	originals = []
 	constructions = []
 	for data in dataset.values():
 		originals.append(custom_to_pil(preprocess_vqgan(
 					preprocess(
-						download_image(data["url"])
+						download_image(data["url"]), target_image_size=TARGET_LEN
 					)[0]
 		)))
 		constructions.append(custom_to_pil(vqgan_from_token(data["vector"].to(DEVICE), model_vqgan, TARGET_LEN // 16)[0]))
-
 	stacked = stack_images(originals, constructions)
 	stacked.show()
 
-def train_iters(epochs, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert):
+def train_iters(epochs, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert, start_epoch=0):
 	dataset_len = len(dataset)
-	info_steps = dataset_len // 10
-	torch.save({
-		"epoch": -1,
-		"state_dict": model_decoder.state_dict(),
-		"optimizer": optimizer.state_dict()
-	}, f"./{PRETRAIN_DIR}/model_epochs/inital.pt")
-	for i in range(epochs):
+	info_steps = dataset_len // 100
+	for epoch in range(start_epoch, epochs):
+		best_loss = 1e10
 		epoch_loss = 0
+		percent = 0
 		for i, data in enumerate(dataset.values()):
 			loss = train(data["tr"], data["vector"], model_bert, tokenizer_bert, model_decoder, optimizer, criterion, max_length=DEC_MAX_LEN)
 			epoch_loss += loss
 			if (i+1) % info_steps == 0:
-				print(f"Data-{i+1} AVG Loss: {epoch_loss / i}")
-		print(f"Epoch-{i+1} AVG Loss: {epoch_loss / dataset_len}")
+				percent += 1
+				avg_loss = epoch_loss / i
+				print(f"Data {percent}% AVG Loss: {avg_loss}")
+				if avg_loss < best_loss:
+					best_loss = avg_loss
+					torch.save({
+						"epoch": epoch,
+						"state_dict": model_decoder.state_dict(),
+						"optimizer": optimizer.state_dict()
+					}, f"./{PRETRAIN_DIR}/model_epochs/{epoch}.pt")
+		print(f"Epoch-{epoch+1} AVG Loss: {epoch_loss / dataset_len}")
 		torch.save({
-			"epoch": i+1,
+			"epoch": epoch+1,
 			"state_dict": model_decoder.state_dict(),
 			"optimizer": optimizer.state_dict()
-		}, f"./{PRETRAIN_DIR}/model_epochs/{i}.pt")
+		}, f"./{PRETRAIN_DIR}/model_epochs/{epoch+1}.pt")
 
 if __name__ == "__main__":
+	LOAD = False
+	EVAL = False
+	TRAIN = False
 	cfg_vqgan = load_config(f"./{PRETRAIN_DIR}/{MODEL_DIR}/configs/model.yaml", display=False)
+	model_vqgan = load_vqgan(cfg_vqgan, ckpt_path=f"{PRETRAIN_DIR}/{MODEL_DIR}/checkpoints/last.ckpt").to(DEVICE)	
 	tokenizer_bert = BertTokenizer.from_pretrained("bert-base-uncased")
 	model_bert = BertModel.from_pretrained("bert-base-uncased", output_hidden_states=True).to(DEVICE)
 	model_bert.eval()
+	epoch = 0
 	model_decoder = DecoderAttnRNN(VOCAB_OUT, max_length=ENC_MAX_LEN).to(DEVICE)
-	model_decoder.train()
-	#cfg_vqgan = load_config(f"./{PRETRAIN_DIR}/{MODEL_DIR}/configs/model.yaml", display=False)
-	#model_vqgan = load_vqgan(cfg_vqgan, ckpt_path=f"{PRETRAIN_DIR}/{MODEL_DIR}/checkpoints/last.ckpt").to(DEVICE)
-	criterion = nn.NLLLoss()
 	optimizer = optim.SGD(model_decoder.parameters(), lr=0.001)
-	dataset = load_dataset(ENCODE_PATH, TRANSLATE_PATH, max_data=-1)
-	train_iters(100, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert)
+	criterion = nn.NLLLoss()
+	if LOAD:
+		chkpoint = torch.load(f"{PRETRAIN_DIR}/model_epochs/1.pt")
+		model_decoder.load_state_dict(chkpoint["state_dict"])
+		epoch = chkpoint["epoch"]
+	if TRAIN:
+		dataset = load_dataset(ENCODE_PATH, TRANSLATE_PATH, DEVICE, -1)
+		train_iters(100, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert, start_epoch=epoch)
+	if EVAL:
+		tokens = evaluate("Metal Tasarım Ulaşılabilir Fildişi Terlik Sandalyeler - Satılık Bir Çift - Resim 7 / 10", model_bert, tokenizer_bert, model_decoder)
+		img = [custom_to_pil(vqgan_from_token(tokens, model_vqgan, TARGET_LEN // 16)[0])]
+		stack = stack_images(img, img)
+		stack.show()
+	#peek_data(10, model_vqgan)
+	
+
 
 
 
