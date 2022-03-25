@@ -1,3 +1,4 @@
+from base64 import encode
 from turtle import hideturtle
 from models.layers import *
 
@@ -53,17 +54,18 @@ class DecoderTransform(nn.Module):
 		dense = self.dense(decode)
 		return self.log_softmax(dense)
 
-class DecoderAttnRNN(nn.Module):
-	def __init__(self, output_size, hidden_size=768, dropout=0.1, max_length=512):
+"""class DecoderAttnRNN(nn.Module):
+	def __init__(self, output_size, hidden_size=768, dropout=0.1, max_length=512, n_layers=4):
 		super().__init__()
 		self.hidden_size = hidden_size
 		self.output_size = output_size
 		self.max_length = max_length
+		self.n_layers = n_layers
 		self.embedding = nn.Embedding(self.output_size, self.hidden_size)
 		self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
 		self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
 		self.dropout = nn.Dropout(dropout)
-		self.gru = nn.GRU(self.hidden_size, self.hidden_size)
+		self.gru = nn.GRU(self.hidden_size, self.hidden_size, self.n_layers, batch_first=True)
 		self.out = nn.Linear(self.hidden_size, self.output_size)
 
 	def forward(self, input, hidden, encoder_outputs):
@@ -79,4 +81,25 @@ class DecoderAttnRNN(nn.Module):
 		return output, hidden, attn_weights
 
 	def hidden_ones(self):
-		return torch.zeros(1, 1, self.hidden_size)
+		return next(self.parameters()).data.new(self.n_layers, 1, self.hidden_size).zero_()"""
+
+class DecoderAttnRNN(nn.Module):
+	def __init__(self, output_size, hidden_size=768, dropout=0.1, max_length=512, n_layers=4):
+		super().__init__()
+		self.hidden_size = hidden_size
+		self.output_size = output_size
+		self.max_length = max_length
+		self.n_layers = n_layers
+		self.embedding = nn.Embedding(self.output_size, self.hidden_size)
+		self.attn = nn.MultiheadAttention(self.hidden_size, 16)
+		self.gru = nn.GRU(self.hidden_size, self.hidden_size, num_layers=self.n_layers, batch_first=True, dropout=dropout)
+		self.out = nn.Linear(self.hidden_size, self.output_size)
+
+	def forward(self, input, hidden, encoder_outputs):
+		embedding = self.embedding(input).view(1, 1, -1)
+		output, hidden = self.gru(embedding, hidden)
+		output = F.log_softmax(self.out(output[-1]), dim=1)
+		return output, hidden, None
+
+	def hidden_ones(self):
+		return next(self.parameters()).data.new(self.n_layers, 1, self.hidden_size).zero_()

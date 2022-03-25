@@ -1,4 +1,4 @@
-from audioop import avg
+import random
 import struct
 import numpy as np
 import yaml
@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import requests
 import io
+import traceback
 
 from preencode_dataset import load_tensor
 
@@ -26,7 +27,7 @@ TEACHER_FORCE_RATIO = 1
 TEST_IMG_URL = "https://www.coinkolik.com/wp-content/uploads/2021/12/shiba-inu-dog.jpg"
 PRETRAIN_DIR = "pretrained"
 MODEL_DIR = "vqgan_f16_1024"
-ENC_MAX_LEN = 512
+ENC_MAX_LEN = 50
 DEC_MAX_LEN = 256
 HID_LEN = 768
 TARGET_LEN = DEC_MAX_LEN
@@ -109,26 +110,29 @@ def stack_images(originals, constuctions, titles=[]):
 	"""
 	return img
 
-def train(image_text, image_tokens, bert_encoder, bert_tokenizer, decoder, optim, criterion, max_length=DEC_MAX_LEN):
+def train(image_text, image_tokens, bert_encoder, bert_tokenizer, decoder, optim, criterion, max_length=DEC_MAX_LEN, sentence_max_len=ENC_MAX_LEN):
 	optim.zero_grad()
 	with torch.no_grad():
-		text_tokens = bert_tokenizer(image_text, max_length=ENC_MAX_LEN, padding="max_length", return_tensors="pt").to(DEVICE)
-		text_decode = bert_encoder(**text_tokens)[2]
-		text_embed = torch.stack(text_decode, dim=0).permute(1, 0, 2, 3)[0][-1]
-	encoder_out = torch.zeros(ENC_MAX_LEN, HID_LEN).to(DEVICE)
+		cut_idx = min(sentence_max_len, len(image_text))
+		image_text = image_text[:cut_idx]
+		text_tokens = bert_tokenizer(image_text, max_length=sentence_max_len, padding="max_length", return_tensors="pt").to(DEVICE)
+		text_decode = bert_encoder(**text_tokens)
+		text_embed = torch.stack(text_decode[2], dim=0).permute(1, 0, 2, 3)[0][-1]
+	encoder_out = torch.zeros(sentence_max_len, HID_LEN).to(DEVICE)
 	for i in range(len(text_embed)):
 		encoder_out[i] = text_embed[i]
-	decoder_hidden = decoder.hidden_ones().to(DEVICE)
+	decoder_hidden = encoder_out[0].repeat(4, 1, 1)
 	decoder_input = torch.tensor([[0]]).to(DEVICE)
-	use_teacher_forcing = True
+	decoded_vector = torch.zeros(max_length, 1).to(DEVICE)
+	use_teacher_forcing = True if random.random() < TEACHER_FORCE_RATIO else False
 	loss = 0
 	if use_teacher_forcing:
-		for i in range(DEC_MAX_LEN):
+		for i in range(max_length):
 			out, decoder_hidden, atten = decoder(decoder_input, decoder_hidden, encoder_out)
 			decoder_input = image_tokens[i]
 			loss += criterion(out, image_tokens[i])
 	else:
-		for i in range(DEC_MAX_LEN):
+		for i in range(max_length):
 			out, decoder_hidden, atten = decoder(decoder_input, decoder_hidden, encoder_out)
 			_, topi = out.data.topk(1)
 			decoder_input = topi.squeeze().detach()
@@ -137,15 +141,17 @@ def train(image_text, image_tokens, bert_encoder, bert_tokenizer, decoder, optim
 	optim.step()
 	return loss.item() / len(image_tokens)
 
-def evaluate(image_text, bert_encoder, bert_tokenizer, decoder, max_length=DEC_MAX_LEN):
+def evaluate(image_text, bert_encoder, bert_tokenizer, decoder, max_length=DEC_MAX_LEN, sentence_max_len=ENC_MAX_LEN):
 	with torch.no_grad():
-		text_tokens = bert_tokenizer(image_text, max_length=ENC_MAX_LEN, padding="max_length", return_tensors="pt").to(DEVICE)
-		text_decode = bert_encoder(**text_tokens)[2]
-		text_embed = torch.stack(text_decode, dim=0).permute(1, 0, 2, 3)[0][-1]
-		encoder_out = torch.zeros(ENC_MAX_LEN, HID_LEN).to(DEVICE)
+		cut_idx = min(sentence_max_len, len(image_text))
+		image_text = image_text[:cut_idx]
+		text_tokens = bert_tokenizer(image_text, max_length=sentence_max_len, padding="max_length", return_tensors="pt").to(DEVICE)
+		text_decode = bert_encoder(**text_tokens)
+		text_embed = torch.stack(text_decode[2], dim=0).permute(1, 0, 2, 3)[0][-1]
+		encoder_out = torch.zeros(sentence_max_len, HID_LEN).to(DEVICE)
 		for i in range(len(text_embed)):
 			encoder_out[i] = text_embed[i]
-		decoder_hidden = decoder.hidden_ones().to(DEVICE)
+		decoder_hidden = encoder_out[0].repeat(4, 1, 1)
 		decoder_input = torch.tensor([[0]]).to(DEVICE)
 		decoded_words = torch.zeros(max_length, dtype=torch.int64).to(DEVICE)
 		for i in range(DEC_MAX_LEN):
@@ -198,56 +204,88 @@ def peek_data(peek_len, model_vqgan):
 	stacked = stack_images(originals, constructions)
 	stacked.show()
 
-def train_iters(epochs, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert, start_epoch=0):
-	dataset_len = len(dataset)
-	info_steps = dataset_len // 100
+def train_iters(epochs, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert, start_epoch=0, start_percent=0, info_steps=10000, eval_len=5):
+	data_list, eval_list = list(dataset.values())[:-eval_len], list(dataset.values())[-eval_len:]
+	dataset_len = len(data_list)
+	evalset_len = len(eval_list)
+	percent_step = max(dataset_len // 100, 1)
+	info_step = max(dataset_len // info_steps, 1)
+	initial_start = percent_step * start_percent
+	print(f"Starting at index: {initial_start} epoch: {start_epoch}")
 	for epoch in range(start_epoch, epochs):
 		best_loss = 1e10
 		epoch_loss = 0
-		percent = 0
-		for i, data in enumerate(dataset.values()):
+		progress = initial_start // info_step if epoch == start_epoch else 0
+		percent = start_percent if epoch == start_epoch else 0
+		start_idx = initial_start if epoch == start_epoch else 0
+		for i, data in enumerate(data_list[start_idx:]):
 			loss = train(data["tr"], data["vector"], model_bert, tokenizer_bert, model_decoder, optimizer, criterion, max_length=DEC_MAX_LEN)
 			epoch_loss += loss
-			if (i+1) % info_steps == 0:
+			if (i+1) % percent_step == 0:
 				percent += 1
-				avg_loss = epoch_loss / i
-				print(f"Data {percent}% AVG Loss: {avg_loss}")
-				if avg_loss < best_loss:
-					best_loss = avg_loss
-					torch.save({
-						"epoch": epoch,
-						"state_dict": model_decoder.state_dict(),
-						"optimizer": optimizer.state_dict()
-					}, f"./{PRETRAIN_DIR}/model_epochs/{epoch}.pt")
+				avg_loss = epoch_loss / i if i > 0 else epoch_loss
+				#print(f"Data {percent}% AVG Loss: {avg_loss}")
+				torch.save({
+					"epoch": epoch,
+					"state_dict": model_decoder.state_dict(),
+					"optimizer": optimizer.state_dict(),
+					"percent": percent
+				}, f"./{PRETRAIN_DIR}/model_epochs/{epoch}_{percent}.pt")
+			if (i+1) % info_step == 0:
+				progress += 1
+				avg_loss = epoch_loss / i if i > 0 else epoch_loss
+				print(f"Progress {progress}/{info_steps}  AVG Loss: {avg_loss}")
+				try:
+					originals = []
+					guesses = []
+					for eval_data in eval_list:
+						tokens = evaluate(eval_data["tr"], model_bert, tokenizer_bert, model_decoder)
+						model_reconstruction = custom_to_pil(vqgan_from_token(tokens, model_vqgan, TARGET_LEN // 16)[0])
+						original = download_image(eval_data["url"])
+						original = preprocess(original, target_image_size=TARGET_LEN)[0]
+						original = custom_to_pil(preprocess_vqgan(original))
+						guesses.append(model_reconstruction)
+						originals.append(original)
+					stack = stack_images(originals, guesses)
+					stack.save(f"./eval_images/{epoch}_{progress}.png", "PNG")
+				except Exception as e:
+					traceback.print_exc()
+			
 		print(f"Epoch-{epoch+1} AVG Loss: {epoch_loss / dataset_len}")
-		torch.save({
+		"""torch.save({
 			"epoch": epoch+1,
 			"state_dict": model_decoder.state_dict(),
-			"optimizer": optimizer.state_dict()
-		}, f"./{PRETRAIN_DIR}/model_epochs/{epoch+1}.pt")
+			"optimizer": optimizer.state_dict(),
+			"percent": 0
+		}, f"./{PRETRAIN_DIR}/model_epochs/{epoch+1}.pt")"""
 
 if __name__ == "__main__":
-	LOAD = False
-	EVAL = False
-	TRAIN = False
+	LOAD, TRAIN, EVAL = False, True, False
 	cfg_vqgan = load_config(f"./{PRETRAIN_DIR}/{MODEL_DIR}/configs/model.yaml", display=False)
 	model_vqgan = load_vqgan(cfg_vqgan, ckpt_path=f"{PRETRAIN_DIR}/{MODEL_DIR}/checkpoints/last.ckpt").to(DEVICE)	
 	tokenizer_bert = BertTokenizer.from_pretrained("bert-base-uncased")
 	model_bert = BertModel.from_pretrained("bert-base-uncased", output_hidden_states=True).to(DEVICE)
 	model_bert.eval()
 	epoch = 0
+	start_percent = 0
 	model_decoder = DecoderAttnRNN(VOCAB_OUT, max_length=ENC_MAX_LEN).to(DEVICE)
-	optimizer = optim.SGD(model_decoder.parameters(), lr=0.001)
-	criterion = nn.NLLLoss()
+	optimizer = optim.Adam(model_decoder.parameters(), lr=0.003)
+	criterion = nn.CrossEntropyLoss()
 	if LOAD:
-		chkpoint = torch.load(f"{PRETRAIN_DIR}/model_epochs/1.pt")
+		chkpoint = torch.load(f"{PRETRAIN_DIR}/model_epochs/after_train.pt")
 		model_decoder.load_state_dict(chkpoint["state_dict"])
-		epoch = chkpoint["epoch"]
 	if TRAIN:
+		model_decoder.train()
 		dataset = load_dataset(ENCODE_PATH, TRANSLATE_PATH, DEVICE, -1)
-		train_iters(100, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert, start_epoch=epoch)
+		print(f"Loaded epoch:{epoch} percent:{start_percent}")
+		try:
+			train_iters(10000, dataset, optimizer, criterion, model_decoder, tokenizer_bert, model_bert, start_epoch=epoch, start_percent=start_percent, eval_len=5)
+		except KeyboardInterrupt:
+			pass
+		torch.save(model_decoder.state_dict(), f"./{PRETRAIN_DIR}/model_epochs/after_train.pt")
 	if EVAL:
-		tokens = evaluate("Metal Tasarım Ulaşılabilir Fildişi Terlik Sandalyeler - Satılık Bir Çift - Resim 7 / 10", model_bert, tokenizer_bert, model_decoder)
+		model_decoder.eval()
+		tokens = evaluate("God Of War", model_bert, tokenizer_bert, model_decoder)
 		img = [custom_to_pil(vqgan_from_token(tokens, model_vqgan, TARGET_LEN // 16)[0])]
 		stack = stack_images(img, img)
 		stack.show()
