@@ -1,4 +1,5 @@
 from turtle import forward
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -43,7 +44,7 @@ class PositionalEncoding(nn.Module):
 		self.dropout = nn.Dropout(p=dropout)
 		pe = torch.zeros(max_len, d_model)
 		pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-		div = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(10000.0) / d_model))
+		div = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
 		pe[:, 0::2] = torch.sin(pos * div)
 		pe[:, 1::2] = torch.cos(pos * div)
 		pe = pe.unsqueeze(0).transpose(0, 1)

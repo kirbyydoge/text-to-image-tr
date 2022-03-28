@@ -15,12 +15,12 @@ from queue import Queue
 from threading import Thread
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'}
-DATA_PATH = "D:/C12M/cc12m_tr.tsv"
+DATA_PATH = "D:/C12M/cc12m_tr_cpy.tsv"
 OUT_PATH = "D:/C12M/cc12m_tr_encoded.bin"
 ECC_PATH = "D:/C12M/cc12m_tr_eccd.bin"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 PRETRAIN_DIR = "pretrained"
-MODEL_DIR = "vqgan_f16_1024"
+MODEL_DIR = "vqgan_f16_16384"
 NUM_PATCHES = 256
 NUM_DOWNLOADERS = 100
 NUM_PREENCODERS = 1

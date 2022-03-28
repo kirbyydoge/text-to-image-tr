@@ -1,5 +1,3 @@
-from base64 import encode
-from turtle import hideturtle
 from models.layers import *
 
 import torch.nn as nn
@@ -38,10 +36,10 @@ class Decoder(nn.Module):
 
 class DecoderTransform(nn.Module):
 	def __init__(self, embedding_dim, hidden_size, n_heads=16,
-				n_layers=4, max_len_out=256, vocab_out=16384, dropout=0.5):
+				n_layers=4, max_length=256, vocab_out=1024, dropout=0.5):
 		super().__init__()
 		self.embedding = nn.Embedding(vocab_out, embedding_dim)
-		self.pe = PositionalEncoding(embedding_dim, max_len=max_len_out)
+		self.pe = PositionalEncoding(embedding_dim, max_len=max_length)
 		layer = nn.TransformerDecoderLayer(embedding_dim, n_heads, hidden_size, dropout)
 		self.decoder = nn.TransformerDecoder(layer, num_layers=n_layers)
 		self.dense = nn.Linear(embedding_dim, vocab_out)
@@ -50,11 +48,11 @@ class DecoderTransform(nn.Module):
 	def forward(self, target, memory):
 		target = self.embedding(target)
 		target = self.pe(target)
-		decode = self.decoder(target, memory)
+		decode = self.decoder(target, memory.repeat())
 		dense = self.dense(decode)
 		return self.log_softmax(dense)
 
-"""class DecoderAttnRNN(nn.Module):
+class DecoderAttnRNNOld(nn.Module):
 	def __init__(self, output_size, hidden_size=768, dropout=0.1, max_length=512, n_layers=4):
 		super().__init__()
 		self.hidden_size = hidden_size
@@ -81,7 +79,7 @@ class DecoderTransform(nn.Module):
 		return output, hidden, attn_weights
 
 	def hidden_ones(self):
-		return next(self.parameters()).data.new(self.n_layers, 1, self.hidden_size).zero_()"""
+		return next(self.parameters()).data.new(self.n_layers, 1, self.hidden_size).zero_()
 
 class DecoderAttnRNN(nn.Module):
 	def __init__(self, output_size, hidden_size=768, dropout=0.1, max_length=512, n_layers=4):
@@ -91,7 +89,6 @@ class DecoderAttnRNN(nn.Module):
 		self.max_length = max_length
 		self.n_layers = n_layers
 		self.embedding = nn.Embedding(self.output_size, self.hidden_size)
-		self.attn = nn.MultiheadAttention(self.hidden_size, 16)
 		self.gru = nn.GRU(self.hidden_size, self.hidden_size, num_layers=self.n_layers, batch_first=True, dropout=dropout)
 		self.out = nn.Linear(self.hidden_size, self.output_size)
 
@@ -100,6 +97,37 @@ class DecoderAttnRNN(nn.Module):
 		output, hidden = self.gru(embedding, hidden)
 		output = F.log_softmax(self.out(output[-1]), dim=1)
 		return output, hidden, None
+
+	def hidden_ones(self):
+		return next(self.parameters()).data.new(self.n_layers, 1, self.hidden_size).zero_()
+
+class DecoderAttnRNNBert(nn.Module):
+	def __init__(self, output_size, hidden_size=768, num_info=2, dropout=0.1, max_length=512, n_layers=4):
+		super().__init__()
+		self.hidden_size = hidden_size
+		self.output_size = output_size
+		self.max_length = max_length
+		self.n_layers = n_layers
+		self.num_info = num_info
+		self.embedding = nn.Embedding(self.output_size, self.hidden_size)
+		self.gru = nn.GRU(self.hidden_size * self.num_info, self.hidden_size * self.num_info, num_layers=self.n_layers, batch_first=True, dropout=dropout)
+		self.reduce = nn.Linear(self.hidden_size * self.num_info, self.hidden_size)
+		self.out = nn.Linear(self.hidden_size * self.num_info, self.output_size)
+		self.act = nn.Tanh()
+
+	def forward(self, x, hidden, atten=[1, 3]):
+		embeddings = []
+		hiddens = []
+		embeddings.append(self.embedding(x[1]))
+		embeddings.append(self.embedding(x[3]))
+		hiddens.append(hidden[1])
+		hiddens.append(hidden[3])
+		embedding = torch.cat(embeddings, dim=2)
+		hidden = torch.cat(hiddens, dim=2)
+		output, hidden = self.gru(embedding, hidden)
+		output = F.log_softmax(self.out(output[-1]), dim=1)
+		hidden = self.act(self.reduce(hidden))
+		return output, hidden
 
 	def hidden_ones(self):
 		return next(self.parameters()).data.new(self.n_layers, 1, self.hidden_size).zero_()
