@@ -1,0 +1,36 @@
+Original: son model arabalar çevreye daha mı az zarar veriyor?
+Bert: son model arabalar çevre için daha az zararlı mı?
+K-Hop_3: En son model arabalar çevreye zarar verdi mi?
+K-Hop_5: En son otomobillere çevreye zarar verdi mi?
+K-Hop_7: Çevrenin en son otomobilleri hasar gördü mü?
+
+Original: çürük raporu alırsam iş bulmada sıkıntı yaşar mıyım?
+Bert: çürük raporu alırsam iş bulamaz mıyım?
+K-Hop_3: Çürümüş raporu alırsam, bir iş bulmak zor mu?
+K-Hop_5: Tembel bir rapor alırsam, bir iş bulmak zor mu?
+K-Hop_7: Çürük ilişkiyi alırsam iş bulmak zor buldum?
+
+Original: ingilizce yazma yeteneğimi geliştirmenin en iyi yolu nedir?
+Bert: ingilizce yazma becerilerimi nasıl geliştirebilirim?
+K-Hop_3: İngilizce yazma yeteneğimi geliştirmenin en iyi yolu nedir?
+K-Hop_5: İngilizce yazma yeteneğimi geliştirmenin en iyi yolu nedir?
+K-Hop_7: İngilizce yazımımı geliştirmenin en iyi yolu nedir?
+
+Original: şimdiye kadarki en iyi şaka nedir? niye ya?
+Bert: şimdiye kadar duyduğun en iyi şaka nedir?
+K-Hop_3: Şimdiye kadarki en iyi şaka nedir? Neden?
+K-Hop_5: En iyi şaka nedir? Neden?
+K-Hop_7: Her zaman en iyi şaka nedir?Çünkü?
+
+Original: yüksek bir ıq'nun bazı olumsuz etkileri nelerdir?
+Bert: yüksek ıq'nun olumsuz etkileri nelerdir?
+K-Hop_3: Yüksek IQ'nun birkaç olumsuz etkisi nedir?
+K-Hop_5: Yüksek qi'nin olumsuz etkisi nedir?
+K-Hop_7: Yüksek IQ'nin olumsuz etkileri nelerdir?
+
+Original: tüm zamanların en iyi 10 kitabı hangileridir?
+Bert: tüm zamanların en iyi 10 kitabı hangileridir?
+K-Hop_3: Tüm zamanların en iyi 10 kitabı nelerdir?
+K-Hop_5: En iyi on kitap hangileridir?
+K-Hop_7: En iyi on en iyi kitap hangileridir?
+
